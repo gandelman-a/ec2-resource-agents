@@ -53,11 +53,8 @@ Location of file containing appropriate credentials.
 END
 }
 
-debug=0
+debug=1
 
-#OCF_RESKEY_address='50.17.207.227'
-
-#__OCF_ACTION=$1
 
 API_TIMEOUT=20
 MAX_RETRY=10
@@ -66,7 +63,7 @@ AWS_COMMAND="aws"
 AWS_TIMEOUT=60
 
 debugger() {
-	[[ $debug != 0 ]] &&	echo $1
+	[[ $debug != 0 ]] && ocf_log info $1
 }
 ec2ip_metadata() {
 	EC2_INSTANCE_ID=$(ec2metadata --instance-id)
@@ -115,19 +112,25 @@ ec2ip_load_credentials() {
 
 ec2ip_validate() {
 	debugger "validate"
-	[[ -z $OCF_RESKEY_address ]] && ocf_log error "EC2 ERROR: address param not set" && exit $OCF_ERR_CONFIGURED
+	[[ -z $OCF_RESKEY_address ]] && ocf_log error "EC2 ERROR: address param not set $OCF_RESKEY_ADDRESS!" && exit $OCF_ERR_CONFIGURED
 	case $OCF_RESKEY_api_tools in
 		"ec2-api-tools")
-			EC2_COMMANDS="ec2-disassociate-address ec2-associate-address"
+			ASSOCIATE_CMD="ec2-associate-address"
+			DISASSOCIATE_CMD="ec2-disassociate-address"
+			EC2_COMMANDS="$ASSOCIATE_CMD $DISASSOCIATE_CMD"
 			;;
 		"aws")
+			ASSOCIATE_CMD="aws associate-address"
+			DISASSOCIATE_CMD="aws disassociate-address"
 			EC2_COMMANDS="aws"
 			;;
 		"euca-2ools")
+			ASSOCIATE_CMD="euca-associate-address"
+			DISASSOCIATE_CMD="euca-disassociate-address"
 			EC2_COMMANDS="euca-associate-address euca-disassociate-address"
 			;;
 		*) ocf_log error "EC2 ERROR: Invalid api tools flavor: $OCF_RESKEY_api_tools" && exit $OCF_ERR_CONFIGURED
-		   ;;
+			;;
 	esac
 	ec2ip_load_credentials
 
@@ -147,64 +150,22 @@ ec2ip_monitor() {
 	return $OCF_NOT_RUNNING	
 }
 
-ec2ip_disassociate-ec2-api-tools() {
-	debugger "disassociate-ec2-api-tools"
-	ec2-disassociate-address $OCF_RESKEY_address 
+
+###### GENERIC
+ec2ip_disassociate() {
+	debugger "ec2ip_disassociate: $DISASSOCIATE_CMD"
+	$DISASSOCIATE_CMD $OCF_RESKEY_address 
 	[[ $? != 0 ]] && debugger "- failed" && return $OCF_ERR_GENERIC
 	debugger "- success"
 	return $OCF_SUCCESS
 }
 
-ec2ip_associate-ec2-api-tools() {
-	debugger "associate-ec2-api-tools"
-	ec2-associate-address $OCF_RESKEY_address -i $EC2_INSTANCE_ID --connection-timeout $AWS_TIMEOUT
+ec2ip_associate() {
+	debugger "ec2ip_associate: $ASSOCIATE_CMD"
+	$ASSOCIATE_CMD $OCF_RESKEY_address -i $EC2_INSTANCE_ID
 	[[ $? != 0 ]] && debugger "- failed, rc: $?" && return $OCF_ERR_GENERIC
 	debugger "-success"
 	return $OCF_SUCCESS
-}
-
-ec2ip_disassociate-aws() {
-	debugger "disassociate-address"
-	aws disassociate-address $OCF_RESKEY_address
-	[[ $? != 0 ]] && debugger "- failed, rc: $?" && return $OCF_ERR_GENERIC
-	debugger "-success"
-	return $OCF_SUCCESS
-
-}
-ec2ip_associate-aws() {
-	debugger "associate-ec2-aws"
-	aws associate-address $OCF_RESKEY_address -i $EC2_INSTANCE_ID
-	[[ $? != 0 ]] && debugger "- failed, rc: $?" && return $OCF_ERR_GENERIC
-	debugger "- success"
-	return $OCF_SUCCESS
-}
-
-ec2ip_associate-euca-2ools() {
-	local rc
-	local try
-	debugger "associate-ec2-euca"
-	try=1
-	while [[ $try -le $MAX_RETRY ]] ; do
-		debugger "-- attempt $try"
-		timeout $API_TIMEOUT euca-associate-address -i $EC2_INSTANCE_ID $OCF_RESKEY_address -U $EC2_URL
-		rc=$?
-		[[ $rc != 124 ]] && break
-		debugger "-- Timed out, trying again."
-		[[ $try -ge $MAX_RETRY ]] && "--- Reached API MAX_RETRY, failed." && return $OCF_ERR_GENERIC
-		try=$[$try+1]
-	done
-	[[ $? != 0 ]] && debug "- failed, rc: $?" && return $OCF_ERR_GENERIC
-	debugger "- success"
-	return $OCF_SUCCESS
-}
-
-ec2ip_disassociate-euca-2ools() {
-	debugger "disassociate-ec2-euca"
-	euca-disassociate-address $OCF_RESKEY_address -U $EC2_URL
-	[[ $? != 0 ]] && debugg "- failed, rc: $?" && return $OCF_ERR_GENERIC
-	debugger "- success"
-	return $OCF_SUCCESS
-
 }
 
 ec2ip_stop() {
@@ -213,12 +174,7 @@ ec2ip_stop() {
 	ec2ip_monitor
 	[[ $? == $OCF_NOT_RUNNING ]] && ocf_log info "EC2: Address $OCF_RESKEY_address already down" && return $OCF_SUCCESS
 	ocf_log info "EC2: Sending request to AWS via $OCF_RESKEY_api_tools"
-	#aws disassociate-address $OCF_RESKEY_address
-	case $OCF_RESKEY_api_tools in
-		"ec2-api-tools") ec2ip_disassociate-ec2-api-tools;;
-		"aws") ec2ip_disassociate-aws;;
-		"euca-2ools") ec2ip_disassociate-euca-2ools;;
-	esac
+	ec2ip_disassociate
 	[[ $? != $OCF_ERR_SUCCESS ]] && return $OCF_ERR_GENERIC
 	i=0
 	ocf_log info "EC2: API request sent, waiting for IP to go down."
@@ -239,12 +195,7 @@ ec2ip_start() {
 	ec2ip_monitor
 	[[ $? == $OCF_SUCCESS ]] && ocf_log info "EC2: $OCF_RESKEY_address already started" && return $OCF_SUCCESS
 	ocf_log info "EC2: Sending request to AWS via $OCF_RESKEY_api_tools"
-	case $OCF_RESKEY_api_tools in
-		"ec2-api-tools") ec2ip_associate-ec2-api-tools;;
-		"aws") ec2ip_associate-aws;;
-		"euca-2ools") ec2ip_associate-euca-2ools;;
-	esac
-	#aws associate-address $OCF_RESKEY_address -i $EC2_INSTANCE_ID
+	ec2ip_associate 
 	[[ $? != 0 ]] && echo "ERROR: Received $? from 'aws'" && return $OCF_ERR_GENERIC
 	i=0
 	ocf_log info "EC2: API request sent, waiting for IP."
@@ -272,5 +223,5 @@ case $__OCF_ACTION in
 	start)
 		ec2ip_start;;
 	*)	exit $OCF_ERR_UNIMPLEMENTED;;
-esac
+eac
 exit $?
